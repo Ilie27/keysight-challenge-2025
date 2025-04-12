@@ -72,59 +72,91 @@ int main() {
     // Parsing node: Filter packets and count protocol types
     tbb::flow::function_node<std::vector<std::array<char, PACKET_SIZE>>, std::vector<std::array<char, PACKET_SIZE>>> parse_node{
         g, tbb::flow::unlimited, [&](std::vector<std::array<char, PACKET_SIZE>> packets) {
-            std::vector<std::array<char, PACKET_SIZE>> ipv4_packets;
+            std::vector<std::array<char, PACKET_SIZE>> ipv4_ipv6_packets;
+    
+            // Counters
             size_t ipv4_count = 0, ipv6_count = 0, arp_count = 0;
-
+            size_t icmp_count = 0, tcp_count = 0, udp_count = 0;
+    
             for (const auto& packet : packets) {
-                // Check EtherType field (bytes 12 and 13 in Ethernet header)
-                if (static_cast<unsigned char>(packet[12]) == 0x08 && static_cast<unsigned char>(packet[13]) == 0x00) { // IPv4 EtherType
-                    ipv4_packets.push_back(packet);
+                uint8_t eth_type1 = static_cast<uint8_t>(packet[12]);
+                uint8_t eth_type2 = static_cast<uint8_t>(packet[13]);
+    
+                if (eth_type1 == 0x08 && eth_type2 == 0x00) {  // IPv4 EtherType
                     ipv4_count++;
-                } else if (static_cast<unsigned char>(packet[12]) == 0x86 && static_cast<unsigned char>(packet[13]) == 0xDD) { // IPv6 EtherType
+                    ipv4_ipv6_packets.push_back(packet);
+    
+                    // Extract IPv4 protocol field (Ethernet 14 bytes + 9 = 23)
+                    uint8_t ip_protocol = static_cast<uint8_t>(packet[23]);
+                    if (ip_protocol == 0x01) icmp_count++; // ICMP
+                    else if (ip_protocol == 0x06) tcp_count++; // TCP
+                    else if (ip_protocol == 0x11) udp_count++; // UDP
+    
+                } else if (eth_type1 == 0x86 && eth_type2 == 0xDD) { // IPv6 EtherType
                     ipv6_count++;
-                } else if (static_cast<unsigned char>(packet[12]) == 0x08 && static_cast<unsigned char>(packet[13]) == 0x06) { // ARP EtherType
+                    ipv4_ipv6_packets.push_back(packet);
+    
+                    // Optional: IPv6 next header is byte 20 (Ethernet + 6), if needed
+                    uint8_t next_header = static_cast<uint8_t>(packet[20]);
+                    if (next_header == 0x01) icmp_count++; // ICMPv6 (simplified assumption)
+                    else if (next_header == 0x06) tcp_count++;
+                    else if (next_header == 0x11) udp_count++;
+    
+                } else if (eth_type1 == 0x08 && eth_type2 == 0x06) { // ARP EtherType
                     arp_count++;
                 }
             }
-
-            // Log the counts
-            std::cout << "Parsed " << ipv4_count << " IPv4 packets, "
-                      << ipv6_count << " IPv6 packets, "
-                      << arp_count << " ARP packets" << std::endl;
-
-            // Return only IPv4 packets for further processing
-            return ipv4_packets;
+    
+            std::cout << "Parsed packets: IPv4=" << ipv4_count
+                      << ", IPv6=" << ipv6_count
+                      << ", ARP=" << arp_count
+                      << ", ICMP=" << icmp_count
+                      << ", TCP=" << tcp_count
+                      << ", UDP=" << udp_count << std::endl;
+    
+            return ipv4_ipv6_packets;
         }
     };
+    
 
     // Routing node: Modify IPv4 destination addresses
     tbb::flow::function_node<std::vector<std::array<char, PACKET_SIZE>>, std::vector<std::array<char, PACKET_SIZE>>> route_node{
         g, tbb::flow::unlimited, [&](std::vector<std::array<char, PACKET_SIZE>> packets) {
-            for (auto& packet : packets) {
-                // Extract and log the original IPv4 destination address
+            std::vector<std::array<char, PACKET_SIZE>> ipv4_packets;
+    
+            for (const auto& packet : packets) {
+                // Skip non-IPv4 packets
+                if (!(static_cast<unsigned char>(packet[12]) == 0x08 &&
+                      static_cast<unsigned char>(packet[13]) == 0x00)) {
+                    continue;
+                }
+    
                 std::cout << "Original IPv4 destination: "
                           << static_cast<int>(static_cast<unsigned char>(packet[30])) << "."
                           << static_cast<int>(static_cast<unsigned char>(packet[31])) << "."
                           << static_cast<int>(static_cast<unsigned char>(packet[32])) << "."
                           << static_cast<int>(static_cast<unsigned char>(packet[33])) << std::endl;
-
-                // Modify the IPv4 destination address by adding 1 to each byte
+    
+                std::array<char, PACKET_SIZE> modified_packet = packet;
+    
+                // Modify destination IP
                 for (int i = 30; i <= 33; ++i) {
-                    packet[i] = static_cast<unsigned char>(packet[i]) + 1;
+                    modified_packet[i] = static_cast<unsigned char>(modified_packet[i]) + 1;
                 }
-
-                // Log the modified IPv4 destination address
+    
                 std::cout << "Modified IPv4 destination: "
-                          << static_cast<int>(static_cast<unsigned char>(packet[30])) << "."
-                          << static_cast<int>(static_cast<unsigned char>(packet[31])) << "."
-                          << static_cast<int>(static_cast<unsigned char>(packet[32])) << "."
-                          << static_cast<int>(static_cast<unsigned char>(packet[33])) << std::endl;
+                          << static_cast<int>(static_cast<unsigned char>(modified_packet[30])) << "."
+                          << static_cast<int>(static_cast<unsigned char>(modified_packet[31])) << "."
+                          << static_cast<int>(static_cast<unsigned char>(modified_packet[32])) << "."
+                          << static_cast<int>(static_cast<unsigned char>(modified_packet[33])) << std::endl;
+    
+                ipv4_packets.push_back(modified_packet);
             }
-
-            // Return the modified packets
-            return packets;
+    
+            return ipv4_packets;
         }
     };
+    
 
     // Packet inspection node
     tbb::flow::function_node<std::vector<std::array<char, PACKET_SIZE>>, std::vector<std::array<char, PACKET_SIZE>>> inspect_packet_node{
