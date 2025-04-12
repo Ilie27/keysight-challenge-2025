@@ -11,6 +11,12 @@
 #include <tbb/flow_graph.h>
 #include <pcap.h> // Include libpcap
 #include "dpc_common.hpp"
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/ether.h>
+#include <linux/if_packet.h>
+#include <unistd.h>
+#include <net/if.h>
 
 const size_t burst_size = 32;
 #define PACKET_SIZE 64
@@ -33,7 +39,7 @@ int main() {
             static char errbuf[PCAP_ERRBUF_SIZE];
 
             if (!handle) {
-                handle = pcap_open_offline("/root/keysight-challenge-2025/src/capture2.pcap", errbuf);
+                handle = pcap_open_offline("/root/keysight-challenge-2025/src/capture3.pcap", errbuf);
                 if (!handle) {
                     std::cerr << "Error opening pcap file: " << errbuf << std::endl;
                     fc.stop();
@@ -165,20 +171,47 @@ int main() {
         }
     };
 
-    // Send node: Simulate sending packets
+    // Send node: Send packets over a raw socket
     tbb::flow::function_node<std::vector<std::array<char, PACKET_SIZE>>> send_node{
         g, tbb::flow::unlimited, [&](std::vector<std::array<char, PACKET_SIZE>> packets) {
             std::cout << "Sending " << packets.size() << " packets" << std::endl;
 
-            for (const auto& packet : packets) {
-                // Simulate sending the packet (e.g., log or write to a socket)
-                // For now, just log the first few bytes of the packet
-                std::cout << "Packet sent: ";
-                for (size_t i = 0; i < std::min<size_t>(10, PACKET_SIZE); ++i) {
-                    std::cout << std::hex << static_cast<int>(static_cast<unsigned char>(packet[i])) << " ";
-                }
-                std::cout << std::dec << std::endl;
+            // Create a raw socket
+            int sock = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+            if (sock < 0) {
+                perror("Socket creation failed");
+                return;
             }
+
+            // Configure the destination interface
+            struct sockaddr_ll dest_addr;
+            std::memset(&dest_addr, 0, sizeof(dest_addr));
+            dest_addr.sll_family = AF_PACKET;
+            dest_addr.sll_protocol = htons(ETH_P_ALL);
+            dest_addr.sll_ifindex = if_nametoindex("eth0");
+            if (dest_addr.sll_ifindex == 0) {
+                perror("Failed to get interface index");
+                close(sock);
+                return;
+            }
+
+            for (const auto& packet : packets) {
+                // Send the packet over the raw socket
+                ssize_t sent_bytes = sendto(sock, packet.data(), PACKET_SIZE, 0,
+                                            (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+                if (sent_bytes < 0) {
+                    perror("Failed to send packet");
+                } else {
+                    std::cout << "Packet sent: ";
+                    for (size_t i = 0; i < std::min<size_t>(10, PACKET_SIZE); ++i) {
+                        std::cout << std::hex << static_cast<int>(static_cast<unsigned char>(packet[i])) << " ";
+                    }
+                    std::cout << std::dec << std::endl;
+                }
+            }
+
+            // Close the socket
+            close(sock);
         }
     };
 
