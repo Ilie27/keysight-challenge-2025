@@ -141,7 +141,7 @@ int main() {
     
                 // Modify destination IP
                 for (int i = 30; i <= 33; ++i) {
-                    modified_packet[i] = static_cast<unsigned char>(modified_packet[i]) + 1;
+                    modified_packet[i] = (static_cast<unsigned char>(modified_packet[i]) + 1) % 256;
                 }
     
                 std::cout << "Modified IPv4 destination: "
