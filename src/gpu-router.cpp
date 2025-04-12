@@ -21,7 +21,7 @@ int main() {
     std::cout << "Using device: " <<
         q.get_device().get_info<sycl::info::device::name>() << std::endl;
 
-    int nth = 10;  // number of threads
+    int nth = std::thread::hardware_concurrency();  // Automatically detect the number of cores
     auto mp = tbb::global_control::max_allowed_parallelism;
     tbb::global_control gc(mp, nth);
     tbb::flow::graph g;
@@ -131,13 +131,33 @@ int main() {
                     gpuQ = sycl::queue(sycl::cpu_selector_v, dpc_common::exception_handler);
                 }
 
-                gpuQ.submit([&](sycl::handler& h) {
-                    auto compute = [=](auto i) {
-                        // Process the packets (e.g., perform GPU computations)
-                    };
+                // Allocate USM memory for the packets
+                char* usm_packets = sycl::malloc_shared<char>(packets.size() * PACKET_SIZE, gpuQ);
 
-                    h.parallel_for(packets.size(), compute);
-                }).wait_and_throw();
+                // Copy data from host to USM
+                for (size_t i = 0; i < packets.size(); ++i) {
+                    std::memcpy(usm_packets + i * PACKET_SIZE, packets[i].data(), PACKET_SIZE);
+                }
+
+                // Submit a single kernel to process all packets
+                gpuQ.submit([&](sycl::handler& h) {
+                    h.parallel_for(sycl::range<2>(packets.size(), PACKET_SIZE), [=](sycl::id<2> idx) {
+                        size_t packet_idx = idx[0]; // Packet index
+                        size_t byte_idx = idx[1];   // Byte index within the packet
+                        usm_packets[packet_idx * PACKET_SIZE + byte_idx] += 1; // Example operation: increment each byte
+                    });
+                });
+
+                // Wait for all GPU operations to complete
+                gpuQ.wait_and_throw();
+
+                // Copy data back from USM to host
+                for (size_t i = 0; i < packets.size(); ++i) {
+                    std::memcpy(packets[i].data(), usm_packets + i * PACKET_SIZE, PACKET_SIZE);
+                }
+
+                // Free USM memory
+                sycl::free(usm_packets, gpuQ);
             }
 
             // Forward the packets to the next node
