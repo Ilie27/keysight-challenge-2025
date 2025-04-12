@@ -2,6 +2,7 @@
 #include <vector>
 #include <iostream>
 #include <string>
+#include <cstring>
 
 #include <sycl/sycl.hpp>
 
@@ -10,7 +11,6 @@
 #include <tbb/flow_graph.h>
 #include <pcap.h> // Include libpcap
 #include "dpc_common.hpp"
-
 
 const size_t burst_size = 32;
 #define PACKET_SIZE 64
@@ -63,6 +63,34 @@ int main() {
         }
     };
 
+    // Parsing node: Filter packets and count protocol types
+    tbb::flow::function_node<std::vector<std::array<char, PACKET_SIZE>>, std::vector<std::array<char, PACKET_SIZE>>> parse_node{
+        g, tbb::flow::unlimited, [&](std::vector<std::array<char, PACKET_SIZE>> packets) {
+            std::vector<std::array<char, PACKET_SIZE>> ipv4_packets;
+            size_t ipv4_count = 0, ipv6_count = 0, arp_count = 0;
+
+            for (const auto& packet : packets) {
+                // Check EtherType field (bytes 12 and 13 in Ethernet header)
+                if (static_cast<unsigned char>(packet[12]) == 0x08 && static_cast<unsigned char>(packet[13]) == 0x00) { // IPv4 EtherType
+                    ipv4_packets.push_back(packet);
+                    ipv4_count++;
+                } else if (static_cast<unsigned char>(packet[12]) == 0x86 && static_cast<unsigned char>(packet[13]) == 0xDD) { // IPv6 EtherType
+                    ipv6_count++;
+                } else if (static_cast<unsigned char>(packet[12]) == 0x08 && static_cast<unsigned char>(packet[13]) == 0x06) { // ARP EtherType
+                    arp_count++;
+                }
+            }
+
+            // Log the counts
+            std::cout << "Parsed " << ipv4_count << " IPv4 packets, "
+                      << ipv6_count << " IPv6 packets, "
+                      << arp_count << " ARP packets" << std::endl;
+
+            // Return only IPv4 packets for further processing
+            return ipv4_packets;
+        }
+    };
+
     // Packet inspection node
     tbb::flow::function_node<std::vector<std::array<char, PACKET_SIZE>>, int> inspect_packet_node {
         g, tbb::flow::unlimited, [&](std::vector<std::array<char, PACKET_SIZE>> packets) {
@@ -89,8 +117,9 @@ int main() {
             return packets.size();
         }};
 
-    // construct graph
-    tbb::flow::make_edge(in_node, inspect_packet_node);
+    // Construct the graph
+    tbb::flow::make_edge(in_node, parse_node);
+    tbb::flow::make_edge(parse_node, inspect_packet_node);
 
     in_node.activate();
     g.wait_for_all();
