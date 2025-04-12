@@ -8,7 +8,9 @@
 #include <tbb/blocked_range.h>
 #include <tbb/global_control.h>
 #include <tbb/flow_graph.h>
+#include <pcap.h> // Include libpcap
 #include "dpc_common.hpp"
+
 
 const size_t burst_size = 32;
 #define PACKET_SIZE 64
@@ -25,30 +27,45 @@ int main() {
     tbb::flow::graph g;
 
     // Input node: get packets from the socket or from the packet capture
-    tbb::flow::input_node<int> in_node{g,
-        [&](tbb::flow_control& fc) -> int {
-            int nr_packets = 0;
-	    char* packet;
+    tbb::flow::input_node<std::vector<std::array<char, PACKET_SIZE>>> in_node{g,
+        [&](tbb::flow_control& fc) -> std::vector<std::array<char, PACKET_SIZE>> {
+            static pcap_t* handle = nullptr;
+            static char errbuf[PCAP_ERRBUF_SIZE];
 
-            std::cout << "Input node running " << std::endl;
-
-            // Attempt to read the packets from the packet capture or read
-	    // them from a network socket
-            packet = NULL;
-            if (packet == NULL) {
-		    std::cout << "No more packets" << std::endl;
-                fc.stop();
-                return 0;
+            if (!handle) {
+                handle = pcap_open_offline("/root/keysight-challenge-2025/src/capture1.pcap", errbuf);
+                if (!handle) {
+                    std::cerr << "Error opening pcap file: " << errbuf << std::endl;
+                    fc.stop();
+                    return {};
+                }
             }
 
-            // Return the number of packets read
-            return nr_packets;
+            std::vector<std::array<char, PACKET_SIZE>> packets;
+            struct pcap_pkthdr* header;
+            const u_char* data;
+
+            for (size_t i = 0; i < burst_size; ++i) {
+                int ret = pcap_next_ex(handle, &header, &data);
+                if (ret <= 0) { // No more packets or error
+                    std::cout << "No more packets" << std::endl;
+                    fc.stop();
+                    break;
+                }
+
+                std::array<char, PACKET_SIZE> packet{};
+                std::memcpy(packet.data(), data, std::min(static_cast<size_t>(header->caplen), static_cast<size_t>(PACKET_SIZE)));
+                packets.push_back(packet);
+            }
+
+            std::cout << "Read " << packets.size() << " packets from capture1.pcap" << std::endl;
+            return packets;
         }
     };
 
     // Packet inspection node
-    tbb::flow::function_node<int, int> inspect_packet_node {
-        g, tbb::flow::unlimited, [&](int nr_packets) {
+    tbb::flow::function_node<std::vector<std::array<char, PACKET_SIZE>>, int> inspect_packet_node {
+        g, tbb::flow::unlimited, [&](std::vector<std::array<char, PACKET_SIZE>> packets) {
             // By including all the SYCL work in a {} block, we ensure
             // all SYCL tasks must complete before exiting the block
             {
@@ -62,18 +79,18 @@ int main() {
                             // Process the packets
                             };
 
-                            h.parallel_for(nr_packets, compute);
+                            h.parallel_for(packets.size(), compute);
                         }
                     ).wait_and_throw();  // end of the commands for the SYCL queue
 
             }  // End of the scope for SYCL code; the queue has completed the work
  
             // Return the number of packets processed
-            return nr_packets;
+            return packets.size();
         }};
 
     // construct graph
-    tbb::flow::make_edge<int>(in_node, inspect_packet_node);
+    tbb::flow::make_edge(in_node, inspect_packet_node);
 
     in_node.activate();
     g.wait_for_all();
