@@ -121,7 +121,7 @@ int main() {
     };
 
     // Packet inspection node
-    tbb::flow::function_node<std::vector<std::array<char, PACKET_SIZE>>, int> inspect_packet_node {
+    tbb::flow::function_node<std::vector<std::array<char, PACKET_SIZE>>, std::vector<std::array<char, PACKET_SIZE>>> inspect_packet_node{
         g, tbb::flow::unlimited, [&](std::vector<std::array<char, PACKET_SIZE>> packets) {
             {
                 sycl::queue gpuQ;
@@ -132,23 +132,41 @@ int main() {
                 }
 
                 gpuQ.submit([&](sycl::handler& h) {
-                            auto compute = [=](auto i) {
-                            // Process the packets
-                            };
+                    auto compute = [=](auto i) {
+                        // Process the packets (e.g., perform GPU computations)
+                    };
 
-                            h.parallel_for(packets.size(), compute);
-                        }
-                    ).wait_and_throw();
+                    h.parallel_for(packets.size(), compute);
+                }).wait_and_throw();
             }
 
-            // Return the number of packets processed
-            return packets.size();
-        }};
+            // Forward the packets to the next node
+            return packets;
+        }
+    };
+
+    // Send node: Simulate sending packets
+    tbb::flow::function_node<std::vector<std::array<char, PACKET_SIZE>>> send_node{
+        g, tbb::flow::unlimited, [&](std::vector<std::array<char, PACKET_SIZE>> packets) {
+            std::cout << "Sending " << packets.size() << " packets" << std::endl;
+
+            for (const auto& packet : packets) {
+                // Simulate sending the packet (e.g., log or write to a socket)
+                // For now, just log the first few bytes of the packet
+                std::cout << "Packet sent: ";
+                for (size_t i = 0; i < std::min<size_t>(10, PACKET_SIZE); ++i) {
+                    std::cout << std::hex << static_cast<int>(static_cast<unsigned char>(packet[i])) << " ";
+                }
+                std::cout << std::dec << std::endl;
+            }
+        }
+    };
 
     // Construct the graph
     tbb::flow::make_edge(in_node, parse_node);
     tbb::flow::make_edge(parse_node, route_node);
     tbb::flow::make_edge(route_node, inspect_packet_node);
+    tbb::flow::make_edge(inspect_packet_node, send_node);
 
     in_node.activate();
     g.wait_for_all();
