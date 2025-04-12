@@ -33,7 +33,7 @@ int main() {
             static char errbuf[PCAP_ERRBUF_SIZE];
 
             if (!handle) {
-                handle = pcap_open_offline("/root/keysight-challenge-2025/src/capture1.pcap", errbuf);
+                handle = pcap_open_offline("/root/keysight-challenge-2025/src/capture2.pcap", errbuf);
                 if (!handle) {
                     std::cerr << "Error opening pcap file: " << errbuf << std::endl;
                     fc.stop();
@@ -91,16 +91,45 @@ int main() {
         }
     };
 
+    // Routing node: Modify IPv4 destination addresses
+    tbb::flow::function_node<std::vector<std::array<char, PACKET_SIZE>>, std::vector<std::array<char, PACKET_SIZE>>> route_node{
+        g, tbb::flow::unlimited, [&](std::vector<std::array<char, PACKET_SIZE>> packets) {
+            for (auto& packet : packets) {
+                // Extract and log the original IPv4 destination address
+                std::cout << "Original IPv4 destination: "
+                          << static_cast<int>(static_cast<unsigned char>(packet[30])) << "."
+                          << static_cast<int>(static_cast<unsigned char>(packet[31])) << "."
+                          << static_cast<int>(static_cast<unsigned char>(packet[32])) << "."
+                          << static_cast<int>(static_cast<unsigned char>(packet[33])) << std::endl;
+
+                // Modify the IPv4 destination address by adding 1 to each byte
+                for (int i = 30; i <= 33; ++i) {
+                    packet[i] = static_cast<unsigned char>(packet[i]) + 1;
+                }
+
+                // Log the modified IPv4 destination address
+                std::cout << "Modified IPv4 destination: "
+                          << static_cast<int>(static_cast<unsigned char>(packet[30])) << "."
+                          << static_cast<int>(static_cast<unsigned char>(packet[31])) << "."
+                          << static_cast<int>(static_cast<unsigned char>(packet[32])) << "."
+                          << static_cast<int>(static_cast<unsigned char>(packet[33])) << std::endl;
+            }
+
+            // Return the modified packets
+            return packets;
+        }
+    };
+
     // Packet inspection node
     tbb::flow::function_node<std::vector<std::array<char, PACKET_SIZE>>, int> inspect_packet_node {
         g, tbb::flow::unlimited, [&](std::vector<std::array<char, PACKET_SIZE>> packets) {
-            // By including all the SYCL work in a {} block, we ensure
-            // all SYCL tasks must complete before exiting the block
             {
-                sycl::queue gpuQ(sycl::gpu_selector_v, dpc_common::exception_handler);
-
-                std::cout << "Selected GPU Device Name: " <<
-                    gpuQ.get_device().get_info<sycl::info::device::name>() << "\n";
+                sycl::queue gpuQ;
+                try {
+                    gpuQ = sycl::queue(sycl::gpu_selector_v, dpc_common::exception_handler);
+                } catch (const sycl::exception& e) {
+                    gpuQ = sycl::queue(sycl::cpu_selector_v, dpc_common::exception_handler);
+                }
 
                 gpuQ.submit([&](sycl::handler& h) {
                             auto compute = [=](auto i) {
@@ -109,17 +138,17 @@ int main() {
 
                             h.parallel_for(packets.size(), compute);
                         }
-                    ).wait_and_throw();  // end of the commands for the SYCL queue
+                    ).wait_and_throw();
+            }
 
-            }  // End of the scope for SYCL code; the queue has completed the work
- 
             // Return the number of packets processed
             return packets.size();
         }};
 
     // Construct the graph
     tbb::flow::make_edge(in_node, parse_node);
-    tbb::flow::make_edge(parse_node, inspect_packet_node);
+    tbb::flow::make_edge(parse_node, route_node);
+    tbb::flow::make_edge(route_node, inspect_packet_node);
 
     in_node.activate();
     g.wait_for_all();

@@ -1,0 +1,1 @@
+sycl::queue gpuQ(sycl::cpu_selector_v, dpc_common::exception_handler);
